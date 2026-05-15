@@ -1,0 +1,360 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>EngagementStream 圖像瀏覽</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html { overscroll-behavior-x: none; }
+  html, body { overflow: hidden; height: 100%; overscroll-behavior: none; }
+  body { font-family: 'Segoe UI', 'Microsoft JhengHei', Arial, sans-serif; background: #f0f0f0; color: #333; }
+  #header {
+    position: sticky; top: 0; z-index: 10;
+    background: #fff; border-bottom: 1px solid #ddd;
+    padding: 12px 20px; display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+    box-shadow: 0 2px 4px rgba(0,0,0,0.05);
+  }
+  #header h1 { font-size: 18px; color: #222; }
+  #header label { font-size: 14px; color: #555; }
+  #header select { padding: 6px 12px; font-size: 14px; border: 1px solid #bbb; border-radius: 4px; cursor: pointer; }
+  #title { margin-left: auto; font-size: 14px; color: #666; }
+
+  .tool-btn {
+    padding: 6px 12px; font-size: 14px; border: 1px solid #bbb; border-radius: 4px;
+    background: #fff; cursor: pointer; user-select: none;
+    display: inline-flex; align-items: center; gap: 6px; line-height: 1;
+  }
+  .tool-btn:hover { background: #f5f5f5; }
+  .tool-btn.active { background: #ffeb3b; border-color: #fbc02d; font-weight: 600; }
+  .hint { font-size: 12px; color: #666; line-height: 1.3; }
+  .hint b { color: #c62828; }
+
+  #stack { margin: 12px clamp(10px, 4vw, 60px); }
+  .panel {
+    background: #fff; border-radius: 8px; box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+    padding: 0; overflow: hidden; position: relative;
+    width: calc(100vw - 2 * clamp(10px, 4vw, 60px));
+    height: calc(100vh - 110px);
+  }
+  .panel-scroll {
+    overflow: auto; width: 100%; height: 100%;
+    cursor: grab; user-select: none;
+    scrollbar-width: none;
+    overscroll-behavior: none;
+    touch-action: pan-x pan-y;
+    -webkit-overflow-scrolling: touch;
+  }
+  .panel-scroll::-webkit-scrollbar { display: none; }
+  .panel-scroll.panning { cursor: grabbing; }
+  .img-wrap { position: relative; display: inline-block; }
+  .img-wrap img { display: block; max-width: none; height: auto; pointer-events: none; }
+  .img-wrap canvas { position: absolute; top: 0; left: 0; pointer-events: none; }
+  body.draw-mode .panel-scroll { cursor: crosshair; }
+  body.draw-mode .img-wrap canvas { pointer-events: auto; cursor: crosshair; }
+  .panel.missing { padding: 20px; text-align: center; color: #aaa; font-size: 13px; font-style: italic; }
+
+  #master-scroll { display: none; }
+
+  /* ── 手機版：標頭緊湊，圖框照樣可拖曳平移 ── */
+  @media (max-width: 768px) {
+    #stack { margin: 8px; }
+    .panel { width: calc(100vw - 16px); height: calc(100vh - 130px); }
+    #header { padding: 8px 10px; gap: 8px; }
+    #header h1 { font-size: 15px; }
+    #title { width: 100%; margin-left: 0; font-size: 12px; }
+  }
+</style>
+</head>
+<body>
+
+<div id="header">
+  <h1>EngagementStream</h1>
+  <label for="date-select">週次：</label>
+  <select id="date-select"></select>
+
+  <button id="btn-draw" class="tool-btn">
+    <svg viewBox="0 0 28 10" width="20" height="20" style="transform:rotate(-45deg);overflow:visible" aria-hidden="true">
+      <rect x="0.5" y="0.5" width="27" height="9" rx="1.5" fill="#333" stroke="#222" stroke-width="0.5"/>
+      <rect x="3"  y="0.5" width="0.8" height="3" fill="#fff"/>
+      <rect x="7"  y="0.5" width="0.8" height="4.5" fill="#fff"/>
+      <rect x="11" y="0.5" width="0.8" height="3" fill="#fff"/>
+      <rect x="15" y="0.5" width="0.8" height="4.5" fill="#fff"/>
+      <rect x="19" y="0.5" width="0.8" height="3" fill="#fff"/>
+      <rect x="23" y="0.5" width="0.8" height="4.5" fill="#fff"/>
+    </svg>檢視尺標</button>
+  <button id="btn-clear" class="tool-btn">清除</button>
+  <span class="hint">※ 僅為輔助觀察的時間標記，<b>不會被儲存</b>；實際標註請於問卷中填寫時間</span>
+
+  <span id="title"></span>
+</div>
+
+<div id="stack"></div>
+<div id="master-scroll"><div id="master-scroll-inner"></div></div>
+
+<script>
+// ── 課程設定：新增/移除課程，或某課程加一週圖，都改這裡 ──
+const COURSES = {
+  AM: { label: "Applied Mechanics 2", weeks: ["W12"] },
+  CC: { label: "Bending the Curve: Climate Change Solutions", weeks: [ "W11"] },
+  EM: { label: "Engineering Mathematics (2)", weeks: ["W12_Mon","W12_Wed"] },
+  NB: { label: "Neural and Behavioral Modeling", weeks: [] },
+};
+
+const CROP_TOP = 0;   // combined 圖最上方裁掉多少 px（依原始解析度計算；0 = 不裁切）
+
+const select = document.getElementById('date-select');
+const stack  = document.getElementById('stack');
+const titleEl = document.getElementById('title');
+
+// ── 由 URL hash 解析課程與週次；hash 範例：#CC、#CCW10、#CCW11 ──
+function parseHash() {
+  const raw = (location.hash || '').replace('#', '');
+  if (!raw) return { course: null, week: null };
+  // 取課程代號（前 2 字大寫比對），剩下的是週次代號（保留原始大小寫）
+  const upper = raw.toUpperCase();
+  const courseKey = Object.keys(COURSES).find(k => upper.startsWith(k)) || null;
+  if (!courseKey) return { course: null, week: null };
+  const week = raw.slice(courseKey.length) || null;
+  return { course: courseKey, week };
+}
+function findWeek(courseKey, weekInput) {
+  if (!weekInput) return null;
+  const c = COURSES[courseKey];
+  if (!c) return null;
+  return c.weeks.find(w => w.toLowerCase() === weekInput.toLowerCase()) || null;
+}
+function fillWeekSelect(courseKey, preferredWeek) {
+  select.innerHTML = '';
+  const c = COURSES[courseKey];
+  if (!c) return;
+  c.weeks.forEach(w => {
+    const opt = document.createElement('option');
+    opt.value = w;
+    opt.textContent = w.replace(/_/g, ' '); // 顯示時把底線換成空格
+    select.appendChild(opt);
+  });
+  const matched = findWeek(courseKey, preferredWeek);
+  if (matched) select.value = matched;
+}
+
+// ── 標註工具狀態 ──
+let drawMode = false;
+let drawColor = "rgba(255,235,59,0.45)";
+const PEN_WIDTH = 22;
+
+function setupCanvas(canvas, img) {
+  const ctx = canvas.getContext('2d');
+  const bands = []; // {x1, x2, color}
+  let drawing = false, startX = 0, currentX = 0, currentColor = drawColor;
+
+  function resize() {
+    canvas.width = img.offsetWidth;
+    canvas.height = img.offsetHeight;
+    redraw();
+  }
+  if (img.complete) resize();
+  else img.addEventListener('load', resize);
+  window.addEventListener('resize', resize);
+
+  function redraw() {
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    bands.forEach(b => {
+      ctx.fillStyle = b.color;
+      ctx.fillRect(Math.min(b.x1, b.x2), 0, Math.abs(b.x2 - b.x1), canvas.height);
+    });
+    if (drawing) {
+      ctx.fillStyle = currentColor;
+      ctx.fillRect(Math.min(startX, currentX), 0, Math.abs(currentX - startX), canvas.height);
+    }
+  }
+  canvas._bands = bands;
+  canvas._redraw = redraw;
+
+  function xPos(e) {
+    const r = canvas.getBoundingClientRect();
+    return (e.clientX - r.left) * (canvas.width / r.width);
+  }
+  canvas.addEventListener('pointerdown', e => {
+    if (!drawMode) return;
+    drawing = true; startX = currentX = xPos(e); currentColor = drawColor;
+    canvas.setPointerCapture(e.pointerId);
+    redraw();
+  });
+  canvas.addEventListener('pointermove', e => {
+    if (!drawing) return;
+    currentX = xPos(e);
+    redraw();
+  });
+  function finish() {
+    if (!drawing) return;
+    drawing = false;
+    if (Math.abs(currentX - startX) > 2) bands.push({ x1: startX, x2: currentX, color: currentColor });
+    redraw();
+  }
+  canvas.addEventListener('pointerup', finish);
+  canvas.addEventListener('pointercancel', finish);
+}
+
+function render() {
+  stack.innerHTML = '';
+  const { course: courseKey } = parseHash();
+  if (!courseKey) {
+    titleEl.textContent = '';
+    stack.innerHTML = `<div class="panel" style="text-align:center;color:#888;font-size:15px;line-height:1.8;">
+      請從你的專屬連結進入頁面。<br>
+      <span style="font-size:13px;color:#aaa;">（網址結尾須加上 <code>#AM</code>、<code>#CC</code>、<code>#EM</code> 或 <code>#NB</code>）</span>
+    </div>`;
+    return;
+  }
+  const c = COURSES[courseKey];
+  titleEl.textContent = c.label;
+
+  const week = select.value;
+  if (!week) {
+    stack.innerHTML = `<div class="panel" style="text-align:center;color:#888;padding:30px;">尚無 ${c.label} 的圖片資料</div>`;
+    return;
+  }
+
+  const panel = document.createElement('div');
+  panel.className = 'panel';
+  const url = `images/${courseKey}/${week}_combined.png`;
+
+  const scroll = document.createElement('div');
+  scroll.className = 'panel-scroll';
+
+  const wrap = document.createElement('div');
+  wrap.className = 'img-wrap';
+  if (CROP_TOP) wrap.style.overflow = 'hidden';
+
+  const img = document.createElement('img');
+  img.src = url;
+  img.alt = `${c.label} ${week}`;
+  img.loading = 'lazy';
+  if (CROP_TOP) img.style.marginTop = `-${CROP_TOP}px`;
+  img.addEventListener('load', () => setTimeout(updateMasterWidth, 30));
+  img.onerror = () => {
+    panel.classList.add('missing');
+    panel.innerHTML = `<div style="padding:20px;color:#aaa;font-style:italic;text-align:center;">（無此圖：${week}_combined.png）</div>`;
+  };
+
+  const canvas = document.createElement('canvas');
+
+  wrap.appendChild(img);
+  wrap.appendChild(canvas);
+  scroll.appendChild(wrap);
+  panel.appendChild(scroll);
+  stack.appendChild(panel);
+
+  setupCanvas(canvas, img);
+  setupPan(scroll);
+}
+
+// 拖曳平移（標註模式關閉時生效）
+function setupPan(scroll) {
+  let panning = false, sx = 0, sy = 0, sl = 0, st = 0;
+  // 攔截滾輪：自己處理捲動，避免觸控板水平滑動觸發瀏覽器「返回上一頁」
+  scroll.addEventListener('wheel', e => {
+    e.preventDefault();
+    scroll.scrollLeft += e.deltaX;
+    scroll.scrollTop  += e.deltaY;
+  }, { passive: false });
+  scroll.addEventListener('pointerdown', e => {
+    if (drawMode) return; // 標註模式時讓 canvas 接管
+    if (e.pointerType === 'touch') return; // 觸控用瀏覽器原生捲動，較順暢
+    panning = true;
+    sx = e.clientX; sy = e.clientY;
+    sl = scroll.scrollLeft; st = scroll.scrollTop;
+    scroll.classList.add('panning');
+    scroll.setPointerCapture(e.pointerId);
+  });
+  scroll.addEventListener('pointermove', e => {
+    if (!panning) return;
+    scroll.scrollLeft = sl - (e.clientX - sx);
+    scroll.scrollTop  = st - (e.clientY - sy);
+  });
+  function end() { panning = false; scroll.classList.remove('panning'); }
+  scroll.addEventListener('pointerup', end);
+  scroll.addEventListener('pointercancel', end);
+}
+
+// ── 統一橫向捲軸 ──
+const master = document.getElementById('master-scroll');
+const masterInner = document.getElementById('master-scroll-inner');
+
+function updateMasterWidth() {
+  const img = document.querySelector('.img-wrap img');
+  const w = img?.offsetWidth || 0;
+  masterInner.style.width = w + 'px';
+}
+let syncing = false;
+master.addEventListener('scroll', () => {
+  if (syncing) return;
+  syncing = true;
+  document.querySelectorAll('.panel-scroll').forEach(el => { el.scrollLeft = master.scrollLeft; });
+  requestAnimationFrame(() => { syncing = false; });
+});
+document.addEventListener('scroll', e => {
+  if (syncing) return;
+  if (!e.target.classList || !e.target.classList.contains('panel-scroll')) return;
+  syncing = true;
+  master.scrollLeft = e.target.scrollLeft;
+  requestAnimationFrame(() => { syncing = false; });
+}, true);
+window.addEventListener('resize', updateMasterWidth);
+
+// 全域攔截 wheel，徹底防止 Chrome 兩指水平滑動觸發「返回上一頁」
+document.addEventListener('wheel', e => {
+  // 只在 panel 裡面攔截，並讓 panel 自己處理捲動
+  const scroll = e.target.closest && e.target.closest('.panel-scroll');
+  if (scroll) {
+    e.preventDefault();
+    scroll.scrollLeft += e.deltaX;
+    scroll.scrollTop  += e.deltaY;
+  } else {
+    // panel 外也阻止水平滑動觸發歷史導航
+    if (Math.abs(e.deltaX) > Math.abs(e.deltaY)) e.preventDefault();
+  }
+}, { passive: false });
+
+// ── 工具列 ──
+const btnDraw = document.getElementById('btn-draw');
+const btnClear = document.getElementById('btn-clear');
+btnDraw.addEventListener('click', () => {
+  drawMode = !drawMode;
+  document.body.classList.toggle('draw-mode', drawMode);
+  btnDraw.classList.toggle('active', drawMode);
+});
+btnClear.addEventListener('click', () => {
+  document.querySelectorAll('.img-wrap canvas').forEach(c => {
+    if (c._bands) c._bands.length = 0;
+    if (c._redraw) c._redraw();
+    else c.getContext('2d').clearRect(0, 0, c.width, c.height);
+  });
+});
+
+let suppressHashUpdate = false;
+select.addEventListener('change', () => {
+  const { course } = parseHash();
+  if (course) {
+    suppressHashUpdate = true;
+    location.hash = course + select.value;
+  }
+  render();
+  setTimeout(updateMasterWidth, 100);
+});
+window.addEventListener('hashchange', () => {
+  if (suppressHashUpdate) { suppressHashUpdate = false; render(); setTimeout(updateMasterWidth, 100); return; }
+  const { course, week } = parseHash();
+  fillWeekSelect(course, week);
+  render();
+  setTimeout(updateMasterWidth, 100);
+});
+
+const initial = parseHash();
+fillWeekSelect(initial.course, initial.week);
+render();
+setTimeout(updateMasterWidth, 200);
+</script>
+</body>
+</html>
