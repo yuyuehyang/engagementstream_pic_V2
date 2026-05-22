@@ -95,10 +95,24 @@
 <script>
 // ── 課程設定：新增/移除課程，或某課程加一週圖，都改這裡 ──
 const COURSES = {
-  AM: { label: "Applied Mechanics 2", weeks: ["W12","W13"] },
-  CC: { label: "Bending the Curve: Climate Change Solutions", weeks: [ "W11","W12","W13"] },
-  EM: { label: "Engineering Mathematics (2)", weeks: ["W12_Mon","W12_Wed","W13_Wed"] },
-  NB: { label: "Neural and Behavioral Modeling", weeks: ["W11","W12"] },
+  AM: { label: "Applied Mechanics 2", weeks: [
+    { id: "W12", date: "5/11" },
+    { id: "W13", date: "5/18" },
+  ]},
+  CC: { label: "Bending the Curve: Climate Change Solutions", weeks: [
+    { id: "W11", date: "5/6" },
+    { id: "W12", date: "5/13" },
+    { id: "W13", date: "5/20" },
+  ]},
+  EM: { label: "Engineering Mathematics (2)", weeks: [
+    { id: "W12_Mon", date: "5/11" },
+    { id: "W12_Wed", date: "5/13" },
+    { id: "W13_Wed", date: "5/20" },
+  ]},
+  NB: { label: "Neural and Behavioral Modeling", weeks: [
+    { id: "W11", date: "5/8" },
+    { id: "W12", date: "5/15" },
+  ]},
 };
 
 const CROP_TOP = 0;   // combined 圖最上方裁掉多少 px（依原始解析度計算；0 = 不裁切）
@@ -122,7 +136,12 @@ function findWeek(courseKey, weekInput) {
   if (!weekInput) return null;
   const c = COURSES[courseKey];
   if (!c) return null;
-  return c.weeks.find(w => w.toLowerCase() === weekInput.toLowerCase()) || null;
+  const found = c.weeks.find(w => w.id.toLowerCase() === weekInput.toLowerCase());
+  return found ? found.id : null;
+}
+function weekLabel(w) {
+  const name = w.id.replace(/_/g, ' ');
+  return w.date ? `${name} (${w.date})` : name;
 }
 function fillWeekSelect(courseKey, preferredWeek) {
   select.innerHTML = '';
@@ -130,8 +149,8 @@ function fillWeekSelect(courseKey, preferredWeek) {
   if (!c) return;
   c.weeks.forEach(w => {
     const opt = document.createElement('option');
-    opt.value = w;
-    opt.textContent = w.replace(/_/g, ' '); // 顯示時把底線換成空格
+    opt.value = w.id;
+    opt.textContent = weekLabel(w);
     select.appendChild(opt);
   });
   const matched = findWeek(courseKey, preferredWeek);
